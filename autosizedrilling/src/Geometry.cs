@@ -70,28 +70,27 @@ namespace AutoSizeDrilling
                 Left = points.Min(p => p.X), Right = points.Max(p => p.X),
                 Bottom = points.Min(p => p.Y), Top = points.Max(p => p.Y)
             };
-            foreach (var l in lines.OrderByDescending(l => Distance(l.A, l.B)))
-            {
-                // Angular test: a short sloping edge must not be treated as vertical/horizontal.
-                double len = Distance(l.A, l.B);
-                if (len <= Tolerance) continue;
-                if (Math.Abs(l.A.X - l.B.X) <= len * 1e-6)
-                {
-                    double x = (l.A.X + l.B.X) / 2;
-                    if (Math.Abs(x - b.Left) <= Tolerance && b.LeftEdge == null) b.LeftEdge = l;
-                    if (Math.Abs(x - b.Right) <= Tolerance && b.RightEdge == null) b.RightEdge = l;
-                }
-                if (Math.Abs(l.A.Y - l.B.Y) <= len * 1e-6)
-                {
-                    double y = (l.A.Y + l.B.Y) / 2;
-                    if (Math.Abs(y - b.Bottom) <= Tolerance && b.BottomEdge == null) b.BottomEdge = l;
-                    if (Math.Abs(y - b.Top) <= Tolerance && b.TopEdge == null) b.TopEdge = l;
-                }
-            }
+            // Pick the actual extreme first. A long nearby inner edge must not outrank
+            // a short outer edge, as can happen around channel flanges/fillets.
+            b.LeftEdge = Boundary(lines, true, b.Left);
+            b.RightEdge = Boundary(lines, true, b.Right);
+            b.BottomEdge = Boundary(lines, false, b.Bottom);
+            b.TopEdge = Boundary(lines, false, b.Top);
             if (b.Right - b.Left <= Tolerance || b.Top - b.Bottom <= Tolerance ||
                 b.LeftEdge == null || b.RightEdge == null || b.BottomEdge == null || b.TopEdge == null)
                 throw new InvalidOperationException("Неоднозначный контур: нужен ортогональный вид с четырьмя крайними прямыми рёбрами. Поворот или косой торец автоматически не размеряются.");
             return b;
+        }
+
+        private LineInfo Boundary(IEnumerable<LineInfo> lines, bool vertical, double extreme)
+        {
+            Func<LineInfo, double> offset = l => Math.Abs((vertical ? l.A.X + l.B.X : l.A.Y + l.B.Y) / 2 - extreme);
+            return lines.Where(l => {
+                double length = Distance(l.A, l.B);
+                double cross = Math.Abs(vertical ? l.A.X - l.B.X : l.A.Y - l.B.Y);
+                return length > Tolerance && cross <= length * 1e-6 &&
+                    offset(l) <= DiameterTolerance;
+            }).OrderBy(offset).ThenByDescending(l => Distance(l.A, l.B)).FirstOrDefault();
         }
 
         public List<Hole> PrepareHoles(IEnumerable<Hole> candidates, Bounds bounds)

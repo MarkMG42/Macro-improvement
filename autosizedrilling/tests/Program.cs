@@ -126,6 +126,29 @@ internal static class Program
         Test("outside and boundary centres are excluded", () => {
             Check(g.PrepareHoles(new[] {new Hole(0,.05,.004),new Hole(.3,.05,.004)},bounds).Count == 0);
         });
+        Test("channel: short outer datum wins over long nearby inner edge", () => {
+            var lines = Rectangle();
+            var outer = new LineInfo(new Point2(0,0),new Point2(0,.005));
+            lines[3] = outer;
+            lines.Add(new LineInfo(new Point2(.00004,0),new Point2(.00004,.1)));
+            Check(ReferenceEquals(g.FindBounds(lines).LeftEdge,outer));
+            lines.Reverse();
+            Check(ReferenceEquals(g.FindBounds(lines).LeftEdge,outer));
+        });
+        Test("channel: missing outer datum cannot be replaced by close inner edge", () => {
+            var lines = Rectangle();
+            lines[3] = new LineInfo(new Point2(.00004,0),new Point2(.00004,.1));
+            Throws(() => g.FindBounds(lines));
+        });
+        Test("channel datum selection is unchanged by drawing scale", () => {
+            foreach (double scale in new[] {1.0,.1,.01,2.0}) {
+                var lines = Rectangle(scale);
+                var outer = new LineInfo(new Point2(0,0),new Point2(0,.005*scale));
+                lines[3] = outer;
+                lines.Add(new LineInfo(new Point2(.00004*scale,0),new Point2(.00004*scale,.1*scale)));
+                Check(ReferenceEquals(new Geometry(scale).FindBounds(lines).LeftEdge,outer));
+            }
+        });
         Console.WriteLine($"{passed} passed, {failed} failed");
         return failed == 0 ? 0 : 1;
     }

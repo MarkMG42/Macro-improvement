@@ -30,9 +30,14 @@ namespace AutoSizeDrilling
         private bool assembly;
         private Geometry geometry;
         private readonly List<DisplayDimension> created = new List<DisplayDimension>();
+        private readonly Dictionary<object, string> entityIds = new Dictionary<object, string>();
+        private readonly Dictionary<DisplayDimension, double> expectedValues = new Dictionary<DisplayDimension, double>();
+        private DiagnosticLog log;
+        private string phase;
 
         public void Run(SldWorks application = null)
         {
+            log = new DiagnosticLog();
             try
             {
                 // Use the instance supplied by VSTA rather than another running SW instance.
@@ -50,16 +55,23 @@ namespace AutoSizeDrilling
                 math = app.GetMathUtility() as MathUtility;
                 if (math == null) throw new InvalidOperationException("Недоступен MathUtility.");
                 geometry = new Geometry(view.ScaleDecimal);
+                log.Write("scale=" + DiagnosticLog.Number(geometry.Scale) + "; assembly=" + assembly);
+                phase = "before rebuild";
                 AddDimensions();
                 model.EditRebuild3();
+                phase = "after rebuild";
+                foreach (var expected in expectedValues.ToArray()) Validate(expected.Key, expected.Value);
                 model.GraphicsRedraw2();
+                log.Write("SUCCESS: validated " + created.Count + " dimensions after rebuild");
             }
             catch (Exception ex)
             {
                 bool rolledBack = Rollback();
+                log.Write("FAILURE: " + ex + "; rollback=" + rolledBack);
                 string message = "AutoSizeDrilling: " + ex.Message +
                     (rolledBack ? "\nНовые размеры отменены; существующие размеры не удалялись." :
-                    "\nНе все новые размеры удалось удалить. Проверьте чертёж перед сохранением.");
+                    "\nНе все новые размеры удалось удалить. Проверьте чертёж перед сохранением.") +
+                    (log.FilePath == null ? "\nНе удалось сохранить диагностический журнал." : "\nЖурнал: " + log.FilePath);
                 Debug.WriteLine(ex);
                 // No WinForms dependency; display through the existing SolidWorks host.
                 var app = application;
@@ -68,11 +80,17 @@ namespace AutoSizeDrilling
             }
             finally
             {
-                if (model != null) model.ClearSelection2(true);
-                created.Clear();
-                view = null;
-                math = null;
-                model = null;
+                try { if (model != null) model.ClearSelection2(true); }
+                finally
+                {
+                    log.Dispose();
+                    created.Clear();
+                    entityIds.Clear();
+                    expectedValues.Clear();
+                    view = null;
+                    math = null;
+                    model = null;
+                }
             }
         }
 
@@ -103,6 +121,8 @@ namespace AutoSizeDrilling
             if (edges == null) throw new InvalidOperationException("Нет доступных рёбер вида.");
             foreach (Edge edge in edges)
             {
+                string id = "E" + (entityIds.Count + 1);
+                entityIds[edge] = id;
                 var curve = (Curve)edge.GetCurve();
                 if (curve == null) throw new InvalidOperationException("Не удалось прочитать кривую ребра.");
                 if (curve.IsLine())
@@ -112,6 +132,7 @@ namespace AutoSizeDrilling
                     if (a == null || b == null) throw new InvalidOperationException("Не удалось прочитать концы прямого ребра.");
                     var p = Transform((double[])a.GetPoint(), component);
                     var q = Transform((double[])b.GetPoint(), component);
+                    log.Write("LINE " + id + " view-start=(" + DiagnosticLog.Point(p) + ") view-end=(" + DiagnosticLog.Point(q) + ")");
                     lines.Add(new LineInfo(new Point2(p[0], p[1]), new Point2(q[0], q[1]), edge));
                 }
                 else if (curve.IsCircle())
@@ -120,6 +141,9 @@ namespace AutoSizeDrilling
                     if (parameters == null) throw new InvalidOperationException("Не удалось проверить замкнутость окружности.");
                     var circle = (double[])curve.CircleParams;
                     var center = Transform(new[] { circle[0], circle[1], circle[2] }, component);
+                    log.Write("CIRCLE " + id + " view-center=(" + DiagnosticLog.Point(center) + ") model-radius=" +
+                        DiagnosticLog.Number(circle[6]) + " u=(" + DiagnosticLog.Number(parameters.UMinValue) + "," +
+                        DiagnosticLog.Number(parameters.UMaxValue) + ")");
                     var at0 = Transform(((double[])curve.Evaluate2(0, 0)).Take(3).ToArray(), component);
                     var at90 = Transform(((double[])curve.Evaluate2(Math.PI / 2, 0)).Take(3).ToArray(), component);
                     extrema.AddRange(Geometry.CircleExtrema(new Point2(center[0], center[1]),
@@ -152,6 +176,8 @@ namespace AutoSizeDrilling
         {
             ReadGeometry(out var lines, out var candidates, out var extrema);
             var b = geometry.FindBounds(lines, extrema);
+            log.Write("DATUM left=" + EntityId(b.LeftEdge.Entity) + " right=" + EntityId(b.RightEdge.Entity) +
+                " bottom=" + EntityId(b.BottomEdge.Entity) + " top=" + EntityId(b.TopEdge.Entity));
             var holes = geometry.PrepareHoles(candidates, b);
             var xPositions = geometry.Positions(holes, true);
             var yPositions = geometry.Positions(holes, false);
@@ -197,8 +223,11 @@ namespace AutoSizeDrilling
         private void Select(object entity, bool append)
         {
             // The same model edge can occur in multiple drawing views.
+            log.Write("SELECT " + EntityId(entity) + " append=" + append);
             if (!view.SelectEntity(entity, append)) throw new InvalidOperationException("Не удалось выбрать ребро в нужном виде.");
         }
+
+        private string EntityId(object entity) => entityIds.TryGetValue(entity, out var id) ? id : "unknown";
 
         private void Register(DisplayDimension display)
         {
@@ -209,6 +238,9 @@ namespace AutoSizeDrilling
 
         private void AddLinear(object a, object b, bool horizontal, double x, double y, double expected, bool toCircle)
         {
+            log.Write("CREATE " + (horizontal ? "AddHorizontalDimension2" : "AddVerticalDimension2") +
+                " datum=" + EntityId(a) + " target=" + EntityId(b) + " expected_model_mm=" +
+                DiagnosticLog.Number(expected / geometry.Scale * 1000));
             model.ClearSelection2(true);
             Select(a, false);
             Select(b, true);
@@ -237,10 +269,14 @@ namespace AutoSizeDrilling
             var dim = display.GetDimension2(0);
             if (dim == null) throw new InvalidOperationException("Нет данных созданного размера.");
             double actual = dim.SystemValue;
+            log.Write("VALIDATE " + phase + " index=" + created.IndexOf(display) + " type=" + display.Type2 +
+                " expected_model_mm=" + DiagnosticLog.Number(expected / geometry.Scale * 1000) +
+                " actual_model_mm=" + DiagnosticLog.Number(actual * 1000));
             if (!geometry.MatchesModelValue(actual, expected))
                 throw new InvalidOperationException(string.Format(
                     "Созданный размер не совпал с геометрией: ожидалось {0:0.######} мм, получено {1:0.######} мм. Возможна привязка к касательной или неподдерживаемый вид.",
                     expected / geometry.Scale * 1000, actual * 1000));
+            expectedValues[display] = expected;
         }
 
         private bool Rollback()
