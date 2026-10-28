@@ -34,6 +34,7 @@ namespace AutoSizeDrilling
         private readonly Dictionary<DisplayDimension, double> expectedValues = new Dictionary<DisplayDimension, double>();
         private DiagnosticLog log;
         private string phase;
+        private bool? originalProjectedDimensions;
 
         public void Run(SldWorks application = null)
         {
@@ -56,6 +57,16 @@ namespace AutoSizeDrilling
                 if (math == null) throw new InvalidOperationException("Недоступен MathUtility.");
                 geometry = new Geometry(view.ScaleDecimal);
                 log.Write("scale=" + DiagnosticLog.Number(geometry.Scale) + "; assembly=" + assembly);
+                originalProjectedDimensions = view.ProjectedDimensions;
+                log.Write("ProjectedDimensions before=" + originalProjectedDimensions.Value);
+                // Horizontal/vertical creation alone does not override a view's true-size mode.
+                // Keep the selected view projected on success; restoring true-size would
+                // reintroduce the user's discrepancy. Other drawing views are untouched.
+                view.ProjectedDimensions = true;
+                if (!view.ProjectedDimensions)
+                    throw new InvalidOperationException("Не удалось включить проекционные размеры выбранного вида.");
+                model.EditRebuild3();
+                log.Write("ProjectedDimensions enforced=true");
                 phase = "before rebuild";
                 AddDimensions();
                 model.EditRebuild3();
@@ -67,10 +78,12 @@ namespace AutoSizeDrilling
             catch (Exception ex)
             {
                 bool rolledBack = Rollback();
+                bool modeRestored = RestoreViewMode();
                 log.Write("FAILURE: " + ex + "; rollback=" + rolledBack);
                 string message = "AutoSizeDrilling: " + ex.Message +
                     (rolledBack ? "\nНовые размеры отменены; существующие размеры не удалялись." :
                     "\nНе все новые размеры удалось удалить. Проверьте чертёж перед сохранением.") +
+                    (modeRestored ? "" : "\nНе удалось восстановить исходный режим размеров вида; проверьте его вручную.") +
                     (log.FilePath == null ? "\nНе удалось сохранить диагностический журнал." : "\nЖурнал: " + log.FilePath);
                 Debug.WriteLine(ex);
                 // No WinForms dependency; display through the existing SolidWorks host.
@@ -87,6 +100,7 @@ namespace AutoSizeDrilling
                     created.Clear();
                     entityIds.Clear();
                     expectedValues.Clear();
+                    originalProjectedDimensions = null;
                     view = null;
                     math = null;
                     model = null;
@@ -293,6 +307,21 @@ namespace AutoSizeDrilling
                 catch (Exception ex) { Debug.WriteLine(ex); ok = false; }
             }
             return ok;
+        }
+
+        private bool RestoreViewMode()
+        {
+            if (!originalProjectedDimensions.HasValue || view == null) return true;
+            try
+            {
+                view.ProjectedDimensions = originalProjectedDimensions.Value;
+                model.EditRebuild3();
+                model.GraphicsRedraw2();
+                bool restored = view.ProjectedDimensions == originalProjectedDimensions.Value;
+                log.Write("ProjectedDimensions restored=" + restored + "; original=" + originalProjectedDimensions.Value);
+                return restored;
+            }
+            catch (Exception ex) { log.Write("Restore view mode failed: " + ex); return false; }
         }
     }
 }

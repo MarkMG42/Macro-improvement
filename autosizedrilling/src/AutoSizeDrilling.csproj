@@ -4,7 +4,7 @@
     <PlatformTarget>x64</PlatformTarget>
     <AssemblyName>AutoSizeDrilling</AssemblyName>
     <RootNamespace>AutoSizeDrilling</RootNamespace>
-    <Version>1.1.1</Version>
+    <Version>1.1.2</Version>
     <LangVersion>latest</LangVersion>
     <Deterministic>true</Deterministic>
     <DebugType>portable</DebugType>
